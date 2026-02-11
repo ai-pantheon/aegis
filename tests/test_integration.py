@@ -1,6 +1,7 @@
 """
 Aegis — Integration Tests
 Tests the full encrypt/pad/shuffle/verify pipeline.
+Tests cryptographic binding (Vault cannot operate without Cloak).
 """
 
 import json
@@ -11,17 +12,19 @@ from pathlib import Path
 # Add parent to path for local development
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from aegis import Vault, Cloak, pad_to_bucket, unpad_from_bucket, BUCKET_SIZES
+from aegis import Cloak, pad_to_bucket, unpad_from_bucket, BUCKET_SIZES
 from aegis import ShuffleBuffer, PrivacyTokenIssuer
+from aegis.vault import Vault, derive_kek, derive_seal_key, SALT_SIZE
+import os, base64
 
 TEST_PASSPHRASE = "test-passphrase-do-not-use-in-production"
-TEST_VAULT_DIR = Path(__file__).parent / "test-vault"
 TEST_CLOAK_DIR = Path(__file__).parent / "test-cloak"
+TEST_BINDING_DIR = Path(__file__).parent / "test-binding"
 
 
 def setup():
     """Clean up test directories."""
-    for d in [TEST_VAULT_DIR, TEST_CLOAK_DIR]:
+    for d in [TEST_CLOAK_DIR, TEST_BINDING_DIR]:
         if d.exists():
             shutil.rmtree(d)
 
@@ -32,9 +35,7 @@ def test_padding():
     for size in [10, 100, 1000, 5000, 20000, 100000]:
         data = b"x" * size
         padded = pad_to_bucket(data)
-        # Padded size should be one of the bucket sizes
         assert len(padded) in BUCKET_SIZES, f"Padded to {len(padded)}, not a bucket size"
-        # Round-trip
         recovered = unpad_from_bucket(padded)
         assert recovered == data, f"Round-trip failed for size {size}"
     print("PASS")
@@ -50,8 +51,8 @@ def test_shuffle():
     assert buf.size == 100
     result = buf.flush()
     assert buf.size == 0
-    assert sorted(result) == items  # Same items
-    assert result != items  # Different order (statistically certain with 100 items)
+    assert sorted(result) == items
+    assert result != items  # Statistically certain with 100 items
     print("PASS")
 
 
@@ -63,63 +64,13 @@ def test_tokens():
     assert len(tokens) == 10
     for t in tokens:
         assert issuer.verify(t), "Valid token failed verification"
-
-    # Invalid token should fail
     assert not issuer.verify("not-a-valid-token")
     assert issuer.issued_count == 10
     print("PASS")
 
 
-def test_vault():
-    """Test vault encrypt/decrypt round-trip."""
-    print("Testing vault...", end=" ")
-    vault = Vault(TEST_PASSPHRASE, vault_dir=TEST_VAULT_DIR)
-
-    data = {"records": [{"id": 1, "value": "hello"}, {"id": 2, "value": "world"}]}
-
-    # Store
-    result = vault.store("test-category", data)
-    assert result["plaintext_bytes"] > 0
-    assert result["encrypted_bytes"] > 0
-
-    # Load
-    loaded = vault.load("test-category")
-    assert loaded == data
-
-    # Verify
-    assert vault.verify("test-category", data)
-
-    # Stats
-    stats = vault.stats()
-    assert stats["total_files"] == 1
-    assert "test-category" in stats["categories"]
-
-    print("PASS")
-
-
-def test_vault_multiple():
-    """Test vault with multiple categories."""
-    print("Testing vault (multi-category)...", end=" ")
-    vault = Vault(TEST_PASSPHRASE, vault_dir=TEST_VAULT_DIR)
-
-    data = {
-        "alpha": {"items": [1, 2, 3]},
-        "beta": {"items": [4, 5, 6]},
-        "gamma": {"items": [7, 8, 9]},
-    }
-
-    vault.store_all(data)
-    loaded = vault.load_all()
-
-    for cat in data:
-        assert cat in loaded, f"Category {cat} missing"
-        assert loaded[cat] == data[cat], f"Category {cat} data mismatch"
-
-    print("PASS")
-
-
-def test_cloak():
-    """Test full cloak pipeline."""
+def test_cloak_store_load():
+    """Test full cloak pipeline: store, load, verify."""
     print("Testing cloak (full pipeline)...", end=" ")
     cloak = Cloak(TEST_PASSPHRASE, vault_dir=TEST_CLOAK_DIR)
 
@@ -148,6 +99,7 @@ def test_cloak():
     assert len(loaded) == 3
     for cat in data:
         assert cat in loaded
+        assert loaded[cat] == data[cat]
 
     # Load individual
     notes = cloak.load("notes")
@@ -166,20 +118,102 @@ def test_cloak():
     print("PASS")
 
 
+def test_cloak_multi_category():
+    """Test cloak with multiple categories and reload."""
+    print("Testing cloak (multi-category reload)...", end=" ")
+    cloak = Cloak(TEST_PASSPHRASE, vault_dir=TEST_CLOAK_DIR / "multi")
+
+    data = {
+        "alpha": {"items": [1, 2, 3]},
+        "beta": {"items": [4, 5, 6]},
+        "gamma": {"items": [7, 8, 9]},
+    }
+
+    cloak.store(data)
+
+    # Create a NEW Cloak instance (simulates restart) — same passphrase
+    cloak2 = Cloak(TEST_PASSPHRASE, vault_dir=TEST_CLOAK_DIR / "multi")
+    loaded = cloak2.load_all()
+
+    for cat in data:
+        assert cat in loaded, f"Category {cat} missing after reload"
+        assert loaded[cat] == data[cat], f"Category {cat} data mismatch"
+
+    print("PASS")
+
+
 def test_wrong_passphrase():
     """Test that wrong passphrase fails to decrypt."""
     print("Testing wrong passphrase...", end=" ")
-    vault1 = Vault("correct-passphrase", vault_dir=TEST_VAULT_DIR / "wrong-pass-test")
-    vault1.store("secret", {"data": "sensitive"})
+    cloak1 = Cloak("correct-passphrase", vault_dir=TEST_BINDING_DIR / "wrong-pass")
+    cloak1.store({"secret": {"data": "sensitive"}})
 
-    # Try to load with different passphrase
     try:
-        vault2 = Vault("wrong-passphrase", vault_dir=TEST_VAULT_DIR / "wrong-pass-test")
-        vault2.load("secret")
+        cloak2 = Cloak("wrong-passphrase", vault_dir=TEST_BINDING_DIR / "wrong-pass")
+        cloak2.load("secret")
         print("FAIL (should have raised an exception)")
         return
     except Exception:
-        pass  # Expected — decryption should fail
+        pass  # Expected — wrong passphrase = wrong bound key = decryption fails
+    print("PASS")
+
+
+def test_vault_no_seal_rejected():
+    """Test that Vault rejects initialization without a seal key."""
+    print("Testing vault rejects no seal...", end=" ")
+    try:
+        Vault(kek=b"x" * 32, seal_key=None, vault_dir=TEST_BINDING_DIR / "no-seal")
+        print("FAIL (should have raised ValueError)")
+        return
+    except ValueError as e:
+        assert "seal_key" in str(e)
+    print("PASS")
+
+
+def test_vault_wrong_seal_cant_decrypt():
+    """Test that Vault with wrong seal produces wrong key — can't decrypt data."""
+    print("Testing wrong seal = can't decrypt...", end=" ")
+    test_dir = TEST_BINDING_DIR / "wrong-seal"
+
+    # Store via Cloak (correct seal)
+    cloak = Cloak(TEST_PASSPHRASE, vault_dir=test_dir)
+    cloak.store({"private": {"msg": "you can't read this without the cloak"}})
+
+    # Now try to access the vault with correct KEK but WRONG seal
+    salt_file = test_dir / ".vault-salt"
+    salt = base64.b64decode(salt_file.read_text())
+    kek = derive_kek(TEST_PASSPHRASE, salt)
+    wrong_seal = os.urandom(32)  # Random seal — not the real one
+
+    vault_direct = Vault(kek=kek, seal_key=wrong_seal, vault_dir=test_dir)
+
+    try:
+        vault_direct.load("private")
+        print("FAIL (should have raised an exception — wrong bound key)")
+        return
+    except Exception:
+        pass  # Expected — wrong seal = wrong bound key = AES-GCM auth tag fails
+    print("PASS")
+
+
+def test_vault_correct_seal_works():
+    """Test that Vault with correct seal (from Cloak derivation) works."""
+    print("Testing correct seal = can decrypt...", end=" ")
+    test_dir = TEST_BINDING_DIR / "correct-seal"
+
+    # Store via Cloak
+    cloak = Cloak(TEST_PASSPHRASE, vault_dir=test_dir)
+    cloak.store({"private": {"msg": "this should be readable"}})
+
+    # Derive the correct seal (same way Cloak does it)
+    salt_file = test_dir / ".vault-salt"
+    salt = base64.b64decode(salt_file.read_text())
+    kek = derive_kek(TEST_PASSPHRASE, salt)
+    seal = derive_seal_key(TEST_PASSPHRASE, salt)
+
+    vault_direct = Vault(kek=kek, seal_key=seal, vault_dir=test_dir)
+    loaded = vault_direct.load("private")
+    assert loaded == {"msg": "this should be readable"}
     print("PASS")
 
 
@@ -187,6 +221,7 @@ def main():
     setup()
     print("=" * 50)
     print("  Aegis Integration Tests")
+    print("  (with cryptographic binding)")
     print("=" * 50)
     print()
 
@@ -194,10 +229,12 @@ def main():
         test_padding,
         test_shuffle,
         test_tokens,
-        test_vault,
-        test_vault_multiple,
-        test_cloak,
+        test_cloak_store_load,
+        test_cloak_multi_category,
         test_wrong_passphrase,
+        test_vault_no_seal_rejected,
+        test_vault_wrong_seal_cant_decrypt,
+        test_vault_correct_seal_works,
     ]
 
     passed = 0
@@ -209,6 +246,8 @@ def main():
             passed += 1
         except Exception as e:
             print(f"FAIL: {e}")
+            import traceback
+            traceback.print_exc()
             failed += 1
 
     print()

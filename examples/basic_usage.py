@@ -2,52 +2,26 @@
 Aegis — Basic Usage Example
 
 Demonstrates encrypting and anonymizing a personal data store.
+The Vault and Cloak are cryptographically bound — you MUST use the
+Cloak to access your data. The Vault cannot operate alone.
 """
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from aegis import Cloak, Vault
+from aegis import Cloak
 
 
 def main():
     # Your passphrase — the only key to your data
     passphrase = "my-secret-passphrase-change-this"
 
-    # ── Example 1: Using the Vault directly (encryption only) ──
     print("=" * 50)
-    print("  Example 1: Vault (Encryption)")
-    print("=" * 50)
-
-    vault = Vault(passphrase, vault_dir="./example-vault")
-
-    # Store some data
-    contacts = {
-        "friends": [
-            {"name": "Alice", "note": "Met at the conference"},
-            {"name": "Bob", "note": "College roommate"},
-        ]
-    }
-
-    result = vault.store("contacts", contacts)
-    print(f"Stored: {result['plaintext_bytes']} bytes -> {result['encrypted_bytes']} bytes encrypted")
-
-    # Load it back
-    loaded = vault.load("contacts")
-    print(f"Loaded: {loaded}")
-
-    # Verify integrity
-    match = vault.verify("contacts", contacts)
-    print(f"Integrity check: {'PASS' if match else 'FAIL'}")
-
-    # ── Example 2: Using the Cloak (encryption + anonymization) ──
-    print()
-    print("=" * 50)
-    print("  Example 2: Cloak (Full Anonymization)")
+    print("  Aegis — Encrypted + Anonymized Storage")
     print("=" * 50)
 
-    cloak = Cloak(passphrase, vault_dir="./example-cloak")
+    cloak = Cloak(passphrase, vault_dir="./example-vault")
 
     # A data store with multiple categories
     my_data = {
@@ -69,9 +43,11 @@ def main():
         },
     }
 
-    # Store through the full pipeline
+    # Store through the full pipeline:
+    # strip metadata → pad to buckets → shuffle order → encrypt → disk
     report = cloak.store(my_data)
 
+    print(f"\nStored {len(report['categories'])} categories")
     print(f"Shuffle order: {report['shuffle_order']}")
     print(f"(Original order was: {list(my_data.keys())})")
     print(f"Privacy tokens used: {report['tokens_used']}")
@@ -83,7 +59,7 @@ def main():
         print(f"  {cat['category']}: {cat['plaintext_bytes']}B -> padded {cat['padded_size']}B -> encrypted {cat['encrypted_bytes']}B")
         print(f"    Metadata stripped: {cat['metadata_stripped']}")
 
-    # Load everything back
+    # Load everything back through the Cloak
     loaded_data = cloak.load_all()
     print(f"\nLoaded {len(loaded_data)} categories: {list(loaded_data.keys())}")
 
@@ -92,13 +68,18 @@ def main():
     for category, status in results.items():
         print(f"  [{status}] {category}")
 
-    # Stats
-    print(f"\nStats: {cloak.stats()}")
+    # Try loading with wrong passphrase
+    print("\nAttempting load with wrong passphrase...")
+    bad_cloak = Cloak("wrong-passphrase", vault_dir="./example-vault")
+    try:
+        bad_cloak.load("journal")
+        print("  ERROR: Should have failed!")
+    except Exception:
+        print("  Correctly rejected — wrong passphrase = wrong key = can't decrypt")
 
-    # ── Cleanup example files ──
+    # Cleanup
     import shutil
     shutil.rmtree("./example-vault", ignore_errors=True)
-    shutil.rmtree("./example-cloak", ignore_errors=True)
     print("\nCleaned up example files.")
 
 

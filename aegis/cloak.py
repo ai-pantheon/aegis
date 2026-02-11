@@ -20,10 +20,12 @@ with no metadata linking them to a user or data type.
 """
 
 import json
+import os
+import base64
 import time
 from pathlib import Path
 
-from aegis.vault import Vault
+from aegis.vault import Vault, derive_kek, derive_seal_key, SALT_SIZE
 from aegis.padding import pad_to_bucket
 from aegis.shuffle import ShuffleBuffer
 from aegis.tokens import PrivacyTokenIssuer
@@ -66,7 +68,23 @@ class Cloak:
     """
 
     def __init__(self, passphrase: str, vault_dir: str | Path = "./vault-encrypted"):
-        self.vault = Vault(passphrase, vault_dir)
+        vault_dir = Path(vault_dir)
+        vault_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load or create salt
+        salt_file = vault_dir / ".vault-salt"
+        if salt_file.exists():
+            salt = base64.b64decode(salt_file.read_text())
+        else:
+            salt = os.urandom(SALT_SIZE)
+            salt_file.write_text(base64.b64encode(salt).decode())
+
+        # Derive both keys — the Vault can't work without the seal
+        kek = derive_kek(passphrase, salt)
+        seal_key = derive_seal_key(passphrase, salt)
+
+        # Pass both to the Vault — it binds them into the Bound Key
+        self.vault = Vault(kek, seal_key, vault_dir)
         self.token_issuer = PrivacyTokenIssuer()
         self.shuffle_buffer = ShuffleBuffer()
         self.tokens = self.token_issuer.issue_batch(100)

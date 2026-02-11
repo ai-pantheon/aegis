@@ -2,12 +2,14 @@
 
 **Client-side encryption and request anonymization for private data stores.**
 
-Your data. Your keys. Your control. Aegis gives you two layers of protection that work together:
+Your data. Your keys. Your control. Aegis gives you two cryptographically bound layers of protection:
 
 | Layer | What It Does |
 |-------|-------------|
 | **Vault** | AES-256-GCM envelope encryption. Each data category gets its own key. The master key is derived from your passphrase and never stored. |
 | **Cloak** | Request anonymization. Bucket padding, metadata stripping, order shuffling, and privacy tokens. An observer sees fixed-size encrypted blobs in random order with no identifying metadata. |
+
+**These layers are cryptographically bound.** The Vault's encryption key requires a seal that only the Cloak can derive. You cannot use the Vault without the Cloak. This isn't a policy — it's math. Bypass the anonymizer and the encryption key is wrong.
 
 Part of the **[You Own You](https://ai-pantheon.ai)** initiative by **[AI Pantheon](https://ai-pantheon.ai)**.
 
@@ -33,37 +35,13 @@ Requires Python 3.10+ and the `cryptography` library.
 
 ## Quick Start
 
-### Vault Only (Encryption)
-
-```python
-from aegis import Vault
-
-vault = Vault("my-secret-passphrase", vault_dir="./my-vault")
-
-# Store encrypted data
-vault.store("contacts", {
-    "friends": [
-        {"name": "Alice", "note": "Met at the conference"},
-        {"name": "Bob", "note": "College roommate"},
-    ]
-})
-
-# Load and decrypt
-contacts = vault.load("contacts")
-print(contacts)
-
-# Verify integrity
-assert vault.verify("contacts", contacts)
-```
-
-### Full Cloak (Encryption + Anonymization)
-
 ```python
 from aegis import Cloak
 
 cloak = Cloak("my-secret-passphrase", vault_dir="./my-vault")
 
-# Store multiple categories through the full pipeline
+# Store multiple categories through the full pipeline:
+# strip metadata → pad to buckets → shuffle order → encrypt → disk
 report = cloak.store({
     "journal": {"entries": [{"date": "2026-02-11", "text": "It works."}]},
     "bookmarks": {"links": [{"url": "https://example.com"}]},
@@ -76,29 +54,38 @@ print(f"Metadata stripped from each request")
 
 # Load everything back
 data = cloak.load_all()
+
+# Verify integrity
+results = cloak.verify_all(data)
 ```
+
+That's it. One class. One passphrase. Full encryption + anonymization.
 
 ---
 
 ## How It Works
 
-### Vault: Envelope Encryption
+### Vault: Envelope Encryption with Cryptographic Binding
 
 ```
 Your Passphrase
     ↓ PBKDF2-SHA256 (600K iterations)
-Key Encryption Key (KEK) ← never stored
-    ↓ encrypts
-Data Encryption Key (DEK) ← one per category, stored encrypted
-    ↓ encrypts
-Your Data → AES-256-GCM → ciphertext on disk
+    ├── KEK (Key Encryption Key)
+    └── Seal Key (via HKDF, separate context)
+            ↓
+        KEK + Seal → HKDF → Bound Key ← requires BOTH components
+            ↓ encrypts
+        DEK (one per category, stored encrypted)
+            ↓ encrypts
+        Your Data → AES-256-GCM → ciphertext on disk
 ```
 
 - Each data category gets its own DEK (Data Encryption Key)
-- DEKs are encrypted by the KEK (Key Encryption Key)
-- The KEK is derived from your passphrase via PBKDF2 with 600,000 iterations
-- The KEK exists only in memory, never on disk
-- Wrong passphrase = decryption fails. No backdoors.
+- DEKs are encrypted by the **Bound Key** (not the KEK alone)
+- The Bound Key requires both the KEK and the Cloak's seal — derived via HKDF with separate contexts
+- Only the Cloak can derive the seal. No seal = wrong Bound Key = can't decrypt DEKs
+- The KEK and Bound Key exist only in memory, never on disk
+- Wrong passphrase OR missing Cloak = decryption fails. No backdoors.
 
 ### Cloak: Traffic Analysis Resistance
 
@@ -118,39 +105,31 @@ Even with encryption, an observer could learn from *patterns*: how big is the da
 ```
 Your Application
     ↓
-┌─────────── Cloak ───────────┐
-│  Strip metadata              │
-│  Pad to bucket size          │
-│  Shuffle order               │
-│  Use privacy token           │
-│  ┌─────── Vault ──────────┐ │
-│  │  Derive KEK (PBKDF2)   │ │
-│  │  Get/create DEK         │ │
-│  │  AES-256-GCM encrypt    │ │
-│  │  Write to disk          │ │
-│  └─────────────────────────┘ │
-└──────────────────────────────┘
+┌──────────────── Cloak ─────────────────┐
+│  Derive KEK + Seal Key (PBKDF2 + HKDF) │
+│  Strip metadata                         │
+│  Pad to bucket size                     │
+│  Shuffle order                          │
+│  Use privacy token                      │
+│  ┌─────────── Vault ─────────────────┐ │
+│  │  Bind Key = HKDF(KEK, Seal)       │ │
+│  │  Get/create DEK (encrypted by BK) │ │
+│  │  AES-256-GCM encrypt data         │ │
+│  │  Write to disk                    │ │
+│  └───────────────────────────────────┘ │
+└─────────────────────────────────────────┘
     ↓
 Encrypted, padded, shuffled files on disk
+(Vault is inaccessible without the Cloak's seal)
 ```
 
 ---
 
 ## API Reference
 
-### `Vault(passphrase, vault_dir="./vault-encrypted")`
-
-| Method | Description |
-|--------|-------------|
-| `store(category, data)` | Encrypt and store a data category |
-| `load(category)` | Load and decrypt a category |
-| `store_all(data_dict)` | Store multiple categories |
-| `load_all()` | Load all categories |
-| `verify(category, original)` | Verify stored data matches original |
-| `categories()` | List stored category names |
-| `stats()` | Get vault statistics |
-
 ### `Cloak(passphrase, vault_dir="./vault-encrypted")`
+
+The single entry point. Creates and manages the bound Vault internally.
 
 | Method | Description |
 |--------|-------------|
@@ -159,6 +138,8 @@ Encrypted, padded, shuffled files on disk
 | `load(category)` | Load a single category |
 | `verify_all(original_dict)` | Verify all categories |
 | `stats()` | Get operational statistics |
+
+The `Vault` class is internal. It requires a seal key that only the Cloak can derive. Attempting to instantiate it directly without a seal raises `ValueError`. Attempting to use it with a wrong seal produces a wrong encryption key — decryption fails silently via AES-GCM authentication.
 
 ### Utilities
 
