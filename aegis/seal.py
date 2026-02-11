@@ -33,6 +33,7 @@ from enum import Enum
 from pathlib import Path
 
 from aegis.shamir import split, combine, Share
+from aegis.connectors.base import ChainConnector
 
 
 class ChainType(Enum):
@@ -121,11 +122,13 @@ class SealAuthority:
         threshold: int = DEFAULT_THRESHOLD,
         chains: list[SealAuthorityConfig] = None,
         local_dir: str | Path = None,
+        connectors: dict[ChainType, ChainConnector] = None,
     ):
         self.threshold = threshold
         self.chains = chains or DEFAULT_CHAINS
         self.num_shares = len(self.chains)
         self.local_dir = Path(local_dir) if local_dir else None
+        self.connectors = connectors or {}
 
         if self.local_dir:
             self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +161,19 @@ class SealAuthority:
                 "distributed": False,
             }
 
-            if self.local_dir:
+            # Try chain connector first
+            connector = self.connectors.get(config.chain)
+            if connector is not None:
+                try:
+                    enc_key = hashlib.sha256(seal_secret + config.chain.value.encode()).digest()
+                    result = connector.store_share(share, enc_key)
+                    chain_report["distributed"] = result.get("success", False)
+                    chain_report.update(result)
+                except NotImplementedError:
+                    chain_report["note"] = f"{config.chain.value} connector not yet implemented"
+                except Exception as e:
+                    chain_report["error"] = str(e)
+            elif self.local_dir:
                 # Local mode: store share to file
                 share_file = self.local_dir / f"share-{share.index}-{config.chain.value}.json"
                 share_data = {
@@ -170,9 +185,8 @@ class SealAuthority:
                 chain_report["distributed"] = True
                 chain_report["location"] = str(share_file)
             else:
-                # Production mode: would deploy to actual blockchain
                 chain_report["distributed"] = False
-                chain_report["note"] = "Production deployment not yet implemented"
+                chain_report["note"] = "No connector or local dir configured"
 
             report["chains"].append(chain_report)
 
@@ -225,12 +239,24 @@ class SealAuthority:
         """
         Request a single share from one authority.
 
-        In production: calls the blockchain contract/endpoint.
-        In local mode: reads from file after verifying proof.
+        Resolution order:
+        1. Use chain connector if one is registered for this chain type
+        2. Fall back to local file mode if local_dir is set
+        3. Return None (authority unavailable)
         """
         # Verify the proof locally (each authority does this independently)
         if not self._verify_proof(proof):
             return None
+
+        # Try chain connector first
+        connector = self.connectors.get(config.chain)
+        if connector is not None:
+            try:
+                digest = proof.digest()
+                signature = proof.client_signature.encode() if proof.client_signature else b""
+                return connector.request_share(digest, signature)
+            except Exception:
+                pass  # Fall through to local mode
 
         if self.local_dir:
             # Local mode: read share from file
@@ -240,8 +266,6 @@ class SealAuthority:
             share_data = json.loads(share_file.read_text())
             return Share.from_hex(share_data["share"])
 
-        # Production mode: would call blockchain RPC
-        # Each chain type has its own connector (to be implemented)
         return None
 
     def _verify_proof(self, proof: CloakProof) -> bool:
@@ -282,7 +306,16 @@ class SealAuthority:
                 "share_index": config.share_index,
                 "enabled": config.enabled,
                 "has_share": False,
+                "has_connector": config.chain in self.connectors,
             }
+
+            connector = self.connectors.get(config.chain)
+            if connector is not None:
+                try:
+                    auth_status["available"] = connector.is_available()
+                    auth_status.update(connector.get_info())
+                except Exception:
+                    auth_status["available"] = False
 
             if self.local_dir:
                 share_file = self.local_dir / f"share-{config.share_index}-{config.chain.value}.json"

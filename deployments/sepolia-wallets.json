@@ -1,0 +1,19 @@
+{
+  "network": "sepolia",
+  "chain_id": 11155111,
+  "deployer": {
+    "address": "0x7497600aEb7eCB4d972dA88399B1448780e634DE",
+    "note": "Owns the SealAuthority contract. Admin functions."
+  },
+  "cloak_signer": {
+    "address": "0x54610aCD091F95a45a4953204cc5cfD9A33D62dD",
+    "note": "Signs Cloak proofs. Authorized on the contract to request seals."
+  },
+  "faucets": [
+    "https://www.alchemy.com/faucets/ethereum-sepolia",
+    "https://sepoliafaucet.com/",
+    "https://faucet.sepolia.dev/"
+  ],
+  "status": "awaiting_funding",
+  "private_keys_location": "NEVER commit private keys. Set as env vars: DEPLOYER_PRIVATE_KEY, SIGNER_PRIVATE_KEY"
+}
