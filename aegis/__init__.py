@@ -20,8 +20,10 @@ from aegis.cloak import Cloak
 from aegis.padding import pad_to_bucket, unpad_from_bucket, BUCKET_SIZES
 from aegis.shuffle import ShuffleBuffer
 from aegis.tokens import PrivacyTokenIssuer
+from aegis.shamir import split as shamir_split, combine as shamir_combine, Share
+from aegis.seal import SealAuthority, CloakProof, ChainType
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "Cloak",
     "ShuffleBuffer",
@@ -29,4 +31,10 @@ __all__ = [
     "pad_to_bucket",
     "unpad_from_bucket",
     "BUCKET_SIZES",
+    "shamir_split",
+    "shamir_combine",
+    "Share",
+    "SealAuthority",
+    "CloakProof",
+    "ChainType",
 ]
