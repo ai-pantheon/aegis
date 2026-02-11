@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.vault
+.vault-salt
+.dek-*
+test-vault/
+test-cloak/
+example-vault/
+example-cloak/
+.env
